@@ -1,0 +1,1262 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+```
+
+#patient admission table
+```{r PtAdmiTable}
+PtAdmiTable0 <- readr::read_csv(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/研究组1/病历.csv",
+  locale=readr::locale(encoding="GB18030")
+) %>% 
+  mutate("Hospital_ID" = as.character(round((parse_number(`就诊标识（医渡云计算）`)/6+12345)*100))) %>% 
+   select(
+     patient_SN,
+    "Hospital_ID",#移除
+    Sex = `性别`,
+    DOB = `出生日期`,
+    Age = `年龄`, HospitalAdmissionTime = `入院(就诊)时间`,
+    EncounterType = `就诊类型`,
+    ChiefComplain_24hr = `主诉（24h内入出院记录）`,
+    AdmissionStatus_24hr = `入院情况（24h内入出院记录）`,
+    ChiefComplain_24hr_dead = `主诉（24小时内入院死亡记录）`,
+    AdmissionStatus_24hr_dead = `入院情况（24小时内入院死亡记录）`,
+    ChiefComplain = `主诉`, Med_history = `现病史`,
+    PastHistory = "既往疾病",
+    StatusOnDischarge = "转归情况",
+    DiagnosisOnDeath = "死亡诊断",
+    StatusOnDischarge_DESC = "出院情况",
+    Discharge_DateTime = "出院时间", DaysHospitalStay = "住院天数"
+  ) %>% 
+   mutate(
+     Sex = recode(Sex, 女 ="Female", 男 = "Male",`女|男` = "Male"),
+     EncounterType = recode(
+       EncounterType,
+       住院 = "Inpatient", 体检 = "HealthCheck",
+       急诊 = "Emergency",门诊 = "Outpatient"
+     ),
+     StatusOnDischarge = recode(
+       StatusOnDischarge,
+       不选 = "Unknown",其他 = "Others", 治愈 = "Cured",
+       好转 = "Recovered",
+       未愈 = "Not cured",死亡 = "Dead",
+       `未愈，再次办理出入院。` = "Readmission",
+       `自动出院` = "Discharge against medical order",
+       `未愈。` ="Not cured",`病情改善` = "Improved",
+       "签字后自动出院。" = "Discharge against medical order",
+       其它 = "Others", "治愈\n疗效评价：治愈" = "Cured",
+       "好转。" = "Recovered","自动离院。"="Discharge against medical order",
+       "未愈（本科）。" = "Not cured",
+       "其他自动出院，转当地ICU" = "Discharge against medical order",
+       "其他自动出院" = "Discharge against medical order",
+       "其他转院康复治疗" = "Discharge to rehabilitation center"
+     ),
+     StatusOnDischarge = if_else(is.na(DiagnosisOnDeath),StatusOnDischarge,"Dead")
+     ) 
+#translate chief complain
+write(
+  unique(PtAdmiTable0$ChiefComplain),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/ChiefComplain.csv"
+  )
+ChiefComplain_Eng2Chin <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/ChiefComplain.xlsx",
+  col_names = c("ChiefComplain_Chin","ChiefComplain_Eng")
+) 
+#translate comorbidities
+write(
+  unique(PtAdmiTable0$PastHistory),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/PastHistory.csv"
+  )
+Pasthis_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/PastHistory_Chin2Eng.xlsx",
+  col_names = c("PastHistory_Chin","PastHistory_Eng")
+) 
+PtAdmiTable <- PtAdmiTable0 %>% 
+  left_join(
+    ChiefComplain_Eng2Chin,
+    by = c("ChiefComplain" = "ChiefComplain_Chin")
+  ) %>% 
+  distinct(Hospital_ID,.keep_all = T) %>% 
+  mutate(Age_cut = cut(Age, breaks = c(0,18,30,40,50,60,70,80,90,150)),
+         Discharge_DateTime = as.duration(HospitalAdmissionTime %--% Discharge_DateTime)/ddays(1),
+         #remove year from text for de-identification
+         Med_history = str_replace_all(Med_history,"20[:digit:]{2}","****")
+  )%>% 
+  left_join(
+    Pasthis_Chin2Eng,
+    by = c("PastHistory" = "PastHistory_Chin")
+  ) %>% select(-PastHistory) %>% 
+  rename("PastHistory" = "PastHistory_Eng")
+  
+ZeroTime <- PtAdmiTable %>% 
+  select(Hospital_ID,HospitalAdmissionTime)
+PtAdmiTable <- PtAdmiTable %>% 
+  select(-c(HospitalAdmissionTime,DOB,Age,Med_history))
+write.csv(
+  PtAdmiTable,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/PtAdmiTable.csv"
+)
+#EMR用于给护理记录单赋值
+NursingChartMatch <- readr::read_csv(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/研究组1/病历.csv",
+  locale=readr::locale(encoding="GB18030")
+) %>% 
+   mutate("Hospital_ID" = as.character(round((parse_number(`就诊标识（医渡云计算）`)/6+12345)*100))) %>% 
+  select(
+    patient_SN,
+    HospitalAdmissionTime =`入院(就诊)时间`,
+    Discharge_DateTime = `出院时间`,
+    "Hospital_ID" ,
+    MedID =`病案号`,
+    HosID = `住院号`
+  )
+```
+
+#医嘱信息
+```{r MedOrder}
+MedOrder_v0 <- readr::read_csv(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/研究组1/医嘱.csv",
+  locale=readr::locale(encoding="GB18030")
+) %>% 
+  mutate("Hospital_ID" = as.character(round((parse_number(`就诊标识（医渡云计算）`)/6+12345)*100))) %>% 
+  select(
+    patient_SN,
+    "Hospital_ID" ,
+    MedOrder_Type = `是否长期医嘱`,
+    MedOrder_DESC = `医嘱内容`,
+    MedOrder_Start_DateTime = `医嘱开始时间`,
+    MedOrder_Stop_DateTime = `医嘱结束时间`
+  ) %>% 
+  mutate(
+    MedOrder_Type = recode(MedOrder_Type, 
+                           临时 ="STAT", 
+                           出院带药 = "OnDischarge",
+                           长期 = "Regular")
+  ) 
+#translate MedOrder_DESC
+write(
+  unique(MedOrder_v0$MedOrder_DESC),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/MedOrder_DESC.csv"
+  )
+MedOrder_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/MedOrder_DESC_Chin2Eng.xlsx",
+  col_names = c("MedOrder_DESC_Chin","MedOrder_DESC_Eng")
+) 
+MedOrder <- MedOrder_v0 %>% 
+  left_join(
+    MedOrder_Chin2Eng,
+    by = c("MedOrder_DESC" = "MedOrder_DESC_Chin")
+  ) %>% 
+  mutate(
+    MedOrder_DESC_Eng = str_replace_all(MedOrder_DESC_Eng,"20[:digit:]{2}","****")
+  )%>% 
+  left_join(ZeroTime) %>% 
+  mutate(
+    MedOrder_Start_DateTime = as.duration(HospitalAdmissionTime %--%MedOrder_Start_DateTime)/ddays(1),
+    MedOrder_Stop_DateTime = as.duration(HospitalAdmissionTime%--%MedOrder_Stop_DateTime)/ddays(1)
+  ) %>% 
+  select(-HospitalAdmissionTime) %>% 
+  filter(!is.na(MedOrder_DESC)) %>% 
+  select(-MedOrder_DESC) %>% 
+  rename(MedOrder_DESC = MedOrder_DESC_Eng)
+
+table(MedOrder$patient_SN%in% PtAdmiTable$patient_SN)
+table(MedOrder$Hospital_ID%in%PtAdmiTable$Hospital_ID)
+write.csv(
+  MedOrder,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/MedOrder.csv"
+)
+```
+
+#检验信息
+```{r Labtest}
+Lab0 <- readr::read_csv(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/研究组1/检验.csv",
+  locale=readr::locale(encoding="GB18030")
+) %>% 
+  mutate("Hospital_ID" = as.character(round((parse_number(`就诊标识（医渡云计算）`)/6+12345)*100))
+         ) %>% 
+   select(
+     patient_SN,
+    "Hospital_ID",
+    "Lab_category" = `检验分类`,
+    "Lab_DateTime"="检验报告时间",
+    "Lab_itemName"="检验子项名称","Lab_results"="检验结果(定量)",
+    "Unit_measure" = "检验单位", 
+    "Sample" = "检验标本",
+    "LabSampleCollect_DateTime" ="检验标本采样时间") %>% 
+  mutate(
+    Lab_category = recode(Lab_category,
+      "临床化学检验类" = "Clinical chemistry lab",
+      "临床体液、血液学检查" = "Clinical body fluid/hematology",
+      "临床微生物与寄生虫检验" = "Clinical microbiology and parasite",
+      "临床免疫学检验" = "Clinical immunology lab"
+    )
+  )
+write(
+  unique(Lab0$Lab_itemName),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/Lab_itemName.csv"
+  )
+write(
+  unique(Lab0$Sample),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/Lab_Sample.csv"
+  )
+Lab_itemName_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/Lab_itemName_Eng.xlsx",
+  col_names = c("Lab_ItemName","Lab_ItemName_Eng")
+) 
+Lab_Sample_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/Lab_SampleEng.xlsx",
+  col_names = c("Lab_Sample","Lab_SampleName")
+)
+Lab <- Lab0 %>% 
+  left_join(
+    Lab_itemName_Chin2Eng,
+    by = c("Lab_itemName"="Lab_ItemName")
+  ) %>% 
+  left_join(
+    Lab_Sample_Chin2Eng,
+    by = c("Sample"="Lab_Sample")
+  ) %>%
+  left_join(ZeroTime) %>% 
+  mutate(
+    Lab_DateTime=as.duration(HospitalAdmissionTime%--%Lab_DateTime)/ddays(1),
+    LabSampleCollect_DateTime = as.duration(HospitalAdmissionTime%--%LabSampleCollect_DateTime)/ddays(1),
+    Lab_ItemName = str_replace(
+      Lab_ItemName_Eng,"D-dimer quantification\\*","D-dimer quantification")     
+         ) %>% 
+  group_by(Lab_ItemName_Eng) %>% #补充检验标本名字
+  tidyr::fill(Lab_SampleName,.direction = "downup")  %>% 
+  ungroup() %>% 
+  dplyr::select(-c(Lab_itemName,Sample,HospitalAdmissionTime,Lab_ItemName_Eng)) 
+table(Lab$patient_SN %in% PtAdmiTable$patient_SN )
+table(Lab$Hospital_ID %in% PtAdmiTable$Hospital_ID )
+write.csv(
+  Lab %>% distinct(Lab_category,Lab_ItemName,Lab_SampleName) ,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/Lab_dictionary.csv"
+)
+write.csv(
+  Lab,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/Lab.csv"
+)
+```
+
+#Diagnosis
+```{r Diagnosis}
+Diagnosis <- readr::read_csv(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/研究组1/诊断.csv",
+  locale=readr::locale(encoding="GB18030")
+) %>% 
+  mutate("Hospital_ID" = as.character(round((parse_number(`就诊标识（医渡云计算）`)/6+12345)*100))
+         ) %>% 
+  select(
+    patient_SN,
+    "Hospital_ID" ,
+    Diagnosis_DESC = '诊断名称',
+    ICD10_code = 'ICD10编码',
+    ICD10_name = 'ICD10名称',
+    Diagnosis_DateTime = `诊断时间`
+  ) %>% 
+  left_join(ZeroTime) %>% 
+  mutate(Diagnosis_DateTime = as.duration(HospitalAdmissionTime %--% Diagnosis_DateTime)/ddays(1) ) %>% 
+  select(-HospitalAdmissionTime)
+table(Diagnosis$Hospital_ID%in%PtAdmiTable$Hospital_ID)
+table(PtAdmiTable$Hospital_ID%in%Diagnosis$Hospital_ID)
+#translate the diagnosis name
+write(
+  unique(Diagnosis$ICD10_name),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/DiagnosisName.csv"
+  )
+DiagnosisName_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/DiagnosisName_Chin2Eng.xlsx",
+  col_names = c("DiagnosisName_Chin","DiagnosisName_Eng")
+) 
+Diagnosis <- Diagnosis %>% 
+  left_join(
+    DiagnosisName_Chin2Eng,
+    by = c("ICD10_name"="DiagnosisName_Chin")
+  ) %>% 
+  select(-ICD10_name) %>% 
+  rename("DiagnosisName" = "DiagnosisName_Eng") %>% 
+  distinct()
+write.csv(
+  Diagnosis,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/Diagnosis.csv"
+)
+```
+
+#生命体征
+```{r VitalSign}
+VitalSign0 <- readr::read_csv(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/研究组1/生命体征.csv",
+  locale=readr::locale(encoding="GB18030")
+) 
+VitalSign <- VitalSign0%>% 
+   mutate(
+    "Hospital_ID" = as.character(round((parse_number(`就诊标识（医渡云计算）`)/6+12345)*100))
+         ) %>% 
+  select(
+    patient_SN,
+    "Hospital_ID" ,
+    VitalSign_DESC = '生命体征子类名称',
+    VitalSign_value = '生命体征查体值',
+    VitalSign_unit = '生命体征子类单位',
+    VitalSign_DateTime = '查体时间'
+  ) %>% 
+  mutate(
+    VitalSign_DESC = recode(
+      VitalSign_DESC,
+      心率 = "Heart Rate",
+      舒张压 = "Diastolic Blood pressure",
+      收缩压 = "Systolic Blood pressure",
+      体重 = "Body weight",
+      呼吸 = "Respiratory rate", 身高 = "Height",
+      体温 = "Temperature",
+      血氧饱和度 = "Oxygen saturation (Pulse Oxymetry)",
+      脉搏 = "Pulse rate"
+    ),
+    VitalSign_unit = recode(
+      VitalSign_unit,
+      `次/分` = "/min",`分/次` = "/min",`%^` = "%",
+      `℃` = "°C",
+      `01257070%`="%"
+    )
+  ) %>% 
+  left_join(ZeroTime) %>% 
+  mutate(VitalSign_DateTime = as.duration(HospitalAdmissionTime %--% VitalSign_DateTime)/ddays(1) ) %>% 
+  select(-HospitalAdmissionTime)
+table(VitalSign0$patient_SN%in% PtAdmiTable$patient_SN)
+write.csv(
+  VitalSign,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/VitalSign.csv"
+)
+```
+
+#hospital transfer
+```{r HospitalTransfer}
+HospitalTransfer <- readr::read_csv(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/研究组1/转科历史.csv",
+  locale=readr::locale(encoding="GB18030")
+) %>% 
+  mutate(
+    "Hospital_ID" = as.character(round((parse_number(`就诊标识（医渡云计算）`)/6+12345)*100))
+         ) %>% 
+  select(
+    patient_SN,
+    "Hospital_ID",
+    TransferOut_DateTime = '转入日期时间',
+    TransferIn_DateTime = '转出日期时间',
+    TransferTo_Dept = '转入科室',
+    TransferFrom_Dept = '转出科室'
+  )
+write(
+  unique(c(HospitalTransfer$TransferTo_Dept,HospitalTransfer$TransferFrom_Dept)),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/HospitalTransfer.csv"
+  )
+HospitalTransfer_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/HospitalTransfer.xlsx",
+  col_names = c("Transfer_Dept","Transfer_Dept_Eng")
+)
+HospitalTransfer <- HospitalTransfer %>% 
+  left_join(
+    HospitalTransfer_Chin2Eng,
+    by = c("TransferTo_Dept"="Transfer_Dept")
+  ) %>% 
+  rename("TransferTo_Dept_Eng" = Transfer_Dept_Eng) %>% 
+  left_join(
+    HospitalTransfer_Chin2Eng,
+    by = c("TransferFrom_Dept"="Transfer_Dept")
+  ) %>% 
+  rename("TransferFrom_Dept_Eng" = Transfer_Dept_Eng) %>% 
+  left_join(ZeroTime) %>% 
+  mutate(TransferIn_DateTime = as.duration(HospitalAdmissionTime %--% TransferIn_DateTime)/ddays(1),
+         TransferOut_DateTime = as.duration(HospitalAdmissionTime %--% TransferOut_DateTime)/ddays(1)
+         ) %>% 
+  select(-c(TransferTo_Dept,TransferFrom_Dept,HospitalAdmissionTime))
+table(HospitalTransfer$Hospital_ID %in% PtAdmiTable$Hospital_ID)
+write.csv(
+  HospitalTransfer,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/HospitalTransfer.csv"
+)
+```
+
+#Medication
+```{r Medication}
+Medication <- readr::read_csv(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/研究组1/用药.csv",
+  locale=readr::locale(encoding="GB18030")
+) %>% 
+  mutate(
+    "Hospital_ID" = as.character(round((parse_number(`就诊标识（医渡云计算）`)/6+12345)*100))
+         ) %>% 
+  select(
+    patient_SN,
+    "Hospital_ID",
+    Med_category = "药品类别",
+    Med_DESC = "用药（通用名称）",
+    SingleDose = "单次剂量",
+    Med_Freq = "用药频率",
+    Med_unit = "用药计量单位",
+    Med_route = "给药方式",
+    Med_startTime = "给药开始时间",
+    Med_stopTime = "给药停止时间"
+  ) %>% 
+  mutate(
+    Med_category = recode(Med_category,
+      "西药" = "Western medicine",
+      "中成药" = "Chinese traditional medicine"
+    )
+  ) 
+write(
+  unique(Medication$Med_route),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/Med_route.csv"
+  )
+MedicationRoute_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/Med_route.xlsx",
+  col_names = c("Med_route_Chin","Med_route_Eng")
+)
+write(
+  unique(Medication$Med_DESC),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/Med_DESC.csv"
+  )
+Med_DESC_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/Med_DESC.xlsx",
+  col_names = c("Med_DESC_Chin","Med_DESC_Eng")
+)
+Medication1 <- Medication %>% 
+  left_join(
+    MedicationRoute_Chin2Eng,
+    by = c("Med_route" = "Med_route_Chin")
+  ) %>% 
+  left_join(
+    Med_DESC_Chin2Eng,
+    by = c("Med_DESC" = "Med_DESC_Chin")
+  ) %>% 
+  left_join(ZeroTime) %>% 
+  mutate(Med_startTime = as.duration(HospitalAdmissionTime %--% Med_startTime)/ddays(1),
+         Med_stopTime = as.duration(HospitalAdmissionTime %--% Med_stopTime)/ddays(1)
+         ) %>% 
+  select(-c(Med_route,HospitalAdmissionTime,Med_DESC))
+write.csv(
+  Medication1,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/Medication.csv"
+)
+```
+
+#检查
+```{r Test}
+ExamReport <- readr::read_csv(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/研究组1/检查.csv",
+  locale=readr::locale(encoding="GB18030")
+) %>% 
+   mutate(
+    "Hospital_ID" = as.character(round((parse_number(`就诊标识（医渡云计算）`)/6+12345)*100))
+         ) %>% 
+  select(
+    patient_SN,
+    "Hospital_ID" ,
+    "ExamReport_Category" =`检查分类`,
+    "ExamReport_item_DESC" = `检查项目名称`,
+    "ExamReport_DESC" = `检查所见`,
+    "ExamReport_Finding" =`检查结论`, 
+    "ExamReport_DateTime" = `检查时间`
+  ) %>% 
+  mutate(
+    ExamReport_Category = recode(
+      ExamReport_Category,
+      "X线检查" = "X ray",
+      "超声" = "Ultrasound",
+      "内镜" = "Endoscopy"
+    )
+  )
+ 
+table(ExamReport$Hospital_ID %in% PtAdmiTable$Hospital_ID)
+write(
+  unique(ExamReport$ExamReport_item_DESC),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/ExamReport_item.csv"
+  )
+ExamReport_item_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/ExamReport_item.xlsx",
+  col_names = c("ExamReport_item_Chin","ExamReport_item_Eng")
+)
+ExamReport1 <- ExamReport %>% 
+  left_join(
+    ExamReport_item_Chin2Eng,
+    by = c("ExamReport_item_DESC" = "ExamReport_item_Chin")
+  ) %>% 
+   left_join(ZeroTime) %>% 
+  mutate(ExamReport_DateTime = as.duration(HospitalAdmissionTime %--% ExamReport_DateTime)/ddays(1)
+         ) %>% 
+  select(-c(ExamReport_item_DESC,HospitalAdmissionTime))
+table(ExamReport1$Hospital_ID%in%PtAdmiTable$Hospital_ID)
+write.csv(
+  ExamReport1,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/ExamReport.csv"
+)
+```
+
+#检验-微生物培养
+```{r MicrobiologyCulture}
+MicrobiologyCulture <- readr::read_csv(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/研究组1/检验-微生物培养.csv",
+  locale=readr::locale(encoding="GB18030")
+) %>% 
+   mutate(
+    "Hospital_ID" = as.character(round((parse_number(`就诊标识（医渡云计算）`)/6+12345)*100))
+         ) %>% 
+  select(
+    patient_SN,
+    "Hospital_ID" ,
+    "MicrobiologyCulture_Category" =`检验套餐名称`,
+    "MicrobiologyCulture_DESC" = `微生物培养细菌名称`,
+    "MicrobiologyCulture_Finding" =`微生物培养结果`, 
+    "MicrobiologyCulture_DateTime" = `检验时间`,
+    "MicrobiologyCulture_Sample" =`检验标本`
+  ) 
+write(
+  unique(MicrobiologyCulture$MicrobiologyCulture_Sample),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/MicrobiologyCulture_sample.csv"
+  )
+MicrobiologyCulture_sample_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/MicrobiologyCulture_sample.xlsx",
+  col_names = c("MicrobiologyCulture_sample_Chin","MicrobiologyCulture_sample_Eng")
+)
+write(
+  unique(MicrobiologyCulture$MicrobiologyCulture_Category),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/MicrobiologyCulture_Category.csv"
+  )
+MicrobiologyCulture_Category_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/MicrobiologyCulture_Category.xlsx",
+  col_names = c("MicrobiologyCulture_Category_Chin","MicrobiologyCulture_Category_Eng")
+)
+write(
+  unique(unique(MicrobiologyCulture$MicrobiologyCulture_DESC)),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/MicrobiologyCulture_DESC.csv"
+  )
+MicrobiologyCulture_DESC_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/MicrobiologyCulture_DESC.xlsx",
+  col_names = c("MicrobiologyCulture_DESC_Chin","MicrobiologyCulture_DESC_Eng")
+)
+MicrobiologyCulture <- MicrobiologyCulture %>% 
+  left_join(MicrobiologyCulture_sample_Chin2Eng,
+            by = c("MicrobiologyCulture_Sample"="MicrobiologyCulture_sample_Chin")) %>% 
+  left_join(MicrobiologyCulture_Category_Chin2Eng,
+            by = c("MicrobiologyCulture_Category"="MicrobiologyCulture_Category_Chin")
+            ) %>% 
+  left_join(MicrobiologyCulture_DESC_Chin2Eng,
+            by=c("MicrobiologyCulture_DESC"="MicrobiologyCulture_DESC_Chin")) %>% 
+  left_join(ZeroTime) %>% 
+  mutate(MicrobiologyCulture_DateTime = as.duration(HospitalAdmissionTime %--% MicrobiologyCulture_DateTime)/ddays(1)
+         ) %>% 
+  select(-c(HospitalAdmissionTime,MicrobiologyCulture_Category,MicrobiologyCulture_DESC,MicrobiologyCulture_Sample))
+write.csv(
+  MicrobiologyCulture,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/MicrobiologyCulture.csv"
+)
+```
+
+#检验-药敏试验
+```{r DrugSens}
+DrugSens <- readr::read_csv(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/研究组1/检验-药敏试验.csv",
+  locale=readr::locale(encoding="GB18030")
+) %>% 
+   mutate(
+    "Hospital_ID" = as.character(round((parse_number(`就诊标识（医渡云计算）`)/6+12345)*100))
+         ) %>% 
+  select(
+    patient_SN,
+    "Hospital_ID" ,
+    Drug_name = `药物中文名称`,
+    Drug_Code = `药物编码`,
+    DrugSens_result = 敏感度,
+    MIC = `最低抑菌浓度`,
+    DrugSens_Microbiology = `药敏检验结果`,
+    DrugSens_Category = 检验套餐名称,
+    DrugSens_sample = 检验标本,
+    DrugSens_DateTime = 检验时间
+  ) %>% 
+  mutate(
+    DrugSens_result = recode(
+      DrugSens_result,
+      不敏感 = "Insensitive",
+      中间 = "Intermediate",
+      剂量依赖性敏感 = "Dose-dependent sensitive",
+      敏感 = "Sensitive",
+      耐药 = "Resistance",
+      阳性 = "Positive",
+      阴性 = "Negative"
+      )
+  )
+write(
+  unique(DrugSens$Drug_name),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/Drug_name.csv"
+  )
+Drug_name_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/Drug_name.xlsx",
+  col_names = c("Drug_name_Chin","Drug_name_Eng")
+)
+write(
+  unique(DrugSens$DrugSens_Microbiology),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/DrugSens_Microbiology.csv"
+  )
+DrugSens_Microbiology_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/DrugSens_Microbiology.xlsx",
+  col_names = c("DrugSens_Microbiology_Chin","DrugSens_Microbiology_Eng")
+)
+write(
+  unique(DrugSens$DrugSens_Category),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/DrugSens_Category.csv"
+  )
+DrugSens_Category_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/DrugSens_Category.xlsx",
+  col_names = c("DrugSens_Category_Chin","DrugSens_Category_Eng")
+)
+write(
+  unique(DrugSens$DrugSens_sample),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/DrugSens_sample.csv"
+  )
+DrugSens_sample_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/DrugSens_sample.xlsx",
+  col_names = c("DrugSens_sample_Chin","DrugSens_sample_Eng")
+)
+DrugSens <- DrugSens %>% 
+  left_join(
+    Drug_name_Chin2Eng, by = c("Drug_name"="Drug_name_Chin")
+  ) %>% 
+  left_join(
+    DrugSens_Microbiology_Chin2Eng, by = c("DrugSens_Microbiology"="DrugSens_Microbiology_Chin")
+  ) %>%
+  left_join(
+    DrugSens_Category_Chin2Eng, by = c("DrugSens_Category"="DrugSens_Category_Chin")
+  ) %>%
+  left_join(
+    DrugSens_sample_Chin2Eng, by = c("DrugSens_sample"="DrugSens_sample_Chin")
+  ) %>%
+  left_join(ZeroTime) %>% 
+  mutate(DrugSens_DateTime = as.duration(HospitalAdmissionTime %--% DrugSens_DateTime)/ddays(1)
+         ) %>% 
+  select(-c(HospitalAdmissionTime,Drug_name,DrugSens_Microbiology,DrugSens_Category,DrugSens_sample))
+write.csv(
+  DrugSens,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/DrugSens.csv"
+)
+```
+
+# 护理数据单子
+```{r NursingCHart}
+#先将最新补充的几例患者加入
+multiplesheets <- function(fname,sheetsName) {
+  # getting info about all excel sheets
+  sheets <- readxl::excel_sheets(fname)
+  sheets <- sheets[str_detect(sheets,sheetsName)]
+  tibble <- lapply(sheets, function(x) readxl::read_excel(fname, sheet = x,col_types = "text")) %>% 
+    bind_rows  
+  # print data frame
+  return(tibble)
+}
+#EICU数据
+EICU_files <- list.files(
+  path = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/5.19后护理数据/5.19后护理数据/ICU数据",    
+                       pattern = "*.xlsx",
+                       full.names = TRUE)
+EICU_data <-  
+  lapply(EICU_files,
+         function(x)
+    multiplesheets(fname = x,sheetsName = "生命体征")
+    ) %>%                                           
+  bind_rows    
+NursingChart_VitalSign <- EICU_data %>% 
+  mutate(`病案号` = str_remove_all(`病案号`,"\\*"),
+         #Hospital_ID = as.character(round((parse_number(`住院号`)/6+12345)*100)),
+         NursingEvent_DateTime = lubridate::as_datetime(
+           `记录时间`,
+           format = "%Y/%m/%d %H:%M:%S")) %>% 
+  mutate(NursingEvent_DateTime = if_else(
+    is.na(NursingEvent_DateTime),
+    lubridate::as_datetime(
+           `记录时间`,
+           format = "%Y-%m-%d %H:%M"),NursingEvent_DateTime
+  )) %>% 
+  inner_join(NursingChartMatch,
+            by = c("病案号" = "MedID")) %>% 
+  filter(NursingEvent_DateTime>=HospitalAdmissionTime & NursingEvent_DateTime<=Discharge_DateTime) %>% 
+  dplyr::select(
+    patient_SN,Hospital_ID,HospitalAdmissionTime,
+    NursingEvent_item = 项目名称,
+    NursingEvent_val = 项目结果,
+    NursingEvent_Unit = 项目单位,
+    NursingEvent_DateTime
+  ) %>% 
+  mutate(Event_DateTime = as.duration(HospitalAdmissionTime %--% NursingEvent_DateTime)/ddays(1)
+         ) %>% 
+  dplyr::select(-c(HospitalAdmissionTime,NursingEvent_DateTime))
+#增加原来那批数据里面的患者
+NursingChart_VitalSign1 <- read_csv(
+  "/Users/zhangzhongheng/Documents/2022/浙江省人民医院数据库构建/DataTable/NursingChart_VitalSign.csv"
+) %>% 
+  mutate(
+    Hospital_ID = as.character(Hospital_ID)
+  ) %>% 
+  inner_join(
+    PtAdmiTable %>% dplyr::select(Hospital_ID)
+  )
+#translation of NursingEvent_item
+write(
+  unique(NursingChart_VitalSign2$NursingEvent_item),
+  file = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/NursingEvent.csv"
+  )
+NursingEvent_Chin2Eng <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/NursingEvent.xlsx",
+  col_names = c("NursingEvent_Chin","NursingEvent_item")
+)
+
+NursingChart_VitalSign2 <-  bind_rows(
+  NursingChart_VitalSign,
+  NursingChart_VitalSign1 %>% 
+    dplyr::select(-1)
+  ) %>% 
+  left_join(
+    NursingEvent_Chin2Eng, 
+    by = c("NursingEvent_item"="NursingEvent_Chin")
+  ) %>% 
+  select(-NursingEvent_item) %>% 
+  rename(NursingEvent_item=NursingEvent_item.y)
+
+table(NursingChart_VitalSign2$Hospital_ID%in%PtAdmiTable$Hospital_ID)
+table(PtAdmiTable$Hospital_ID%in%NursingChart_VitalSign2$Hospital_ID)
+write.csv(
+   NursingChart_VitalSign2 ,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/NursingChart_VitalSign.csv"
+)  
+##IO
+EICU_IO <-  
+  lapply(EICU_files,
+         function(x)
+    multiplesheets(fname = x,sheetsName = "出入量")
+    ) %>%                                           
+  bind_rows   
+NursingChart_IO <- EICU_IO  %>% 
+  mutate(`病案号` = str_remove_all(`病案号`,"\\*"),
+         NursingIO_DateTime = lubridate::as_datetime(
+           `记录时间`,
+           format = "%Y/%m/%d %H:%M:%S")) %>% 
+   mutate(NursingIO_DateTime = if_else(
+    is.na(NursingIO_DateTime),
+    lubridate::as_datetime(
+           `记录时间`,
+           format = "%Y-%m-%d %H:%M"),NursingIO_DateTime
+  )) %>% 
+  inner_join(NursingChartMatch,
+            by = c("病案号" = "MedID")) %>% 
+  filter(NursingIO_DateTime>=HospitalAdmissionTime & NursingIO_DateTime<=Discharge_DateTime) %>% 
+  dplyr::select(
+    patient_SN,Hospital_ID,HospitalAdmissionTime,
+    NursingIO_item = 项目名称,
+    NursingIO_val = 量,
+    NursingIO_Unit = 单位,
+    NursingIO_DateTime, NursingIO_type=类型
+  ) %>% 
+  mutate(Event_DateTime = as.duration(HospitalAdmissionTime %--% NursingIO_DateTime)/ddays(1)
+         ) %>% 
+  dplyr::select(-c(HospitalAdmissionTime,NursingIO_DateTime))
+
+#增加原来那批数据里面的患者
+NursingChart_IO1 <- read_csv(
+  "/Users/zhangzhongheng/Documents/2022/浙江省人民医院数据库构建/DataTable/NursingChart_IO.csv"
+) %>% 
+  mutate(
+    Hospital_ID = as.character(Hospital_ID)
+  ) %>% 
+  inner_join(
+    PtAdmiTable %>% dplyr::select(Hospital_ID)
+  )
+NursingChart_IO2 <- bind_rows(NursingChart_IO,NursingChart_IO1%>% dplyr::select(-1))
+table(PtAdmiTable$Hospital_ID%in%NursingChart_IO2$Hospital_ID)
+write.csv(
+  NursingChart_IO2 ,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/NursingChart_IO.csv"
+) 
+```
+
+#CT片子与临床数据的对应
+```{r}
+#与病历匹配
+PtAdmiTable_CT <- readr::read_csv(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像研究（2019.1-2022.11）/研究组1/病历.csv",
+  locale=readr::locale(encoding="GB18030")
+) %>% 
+  mutate("Hospital_ID" = as.character(round((parse_number(`就诊标识（医渡云计算）`)/6+12345)*100))) %>% 
+  select(
+    patient_SN, Hospital_ID, 
+    MedID = `病案号`,
+    HospitalAdmissionTime = `入院(就诊)时间`
+  ) %>% 
+  filter(!is.na(MedID))
+ReportCT <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/data1.xlsx"
+)
+CT2hospitalID <- readxl::read_xlsx(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/脓毒症影像流水号最终.xlsx"
+) %>% 
+  dplyr::select(
+    MedID = 病历号,
+    serialID = 流水号,
+    CTexame_DateTime = 检查时间
+  ) %>% 
+  mutate(
+    CTexame_DateTime = lubridate::as_datetime(
+           CTexame_DateTime,
+           format = "%Y.%m.%d"),
+    MedID = as.character(MedID)
+  ) %>% 
+  fill(MedID, .direction = "down") %>% 
+  left_join(PtAdmiTable_CT,by = "MedID") %>% 
+  mutate(CTexame_DateTime = as.duration(HospitalAdmissionTime %--% CTexame_DateTime)/ddays(1)) %>% 
+  group_by(serialID) %>% 
+  group_modify(~{
+    if(nrow(.x)>1){
+      .x = .x[which.min(abs(.x$CTexame_DateTime)),]
+    } else{
+      .x = .x
+    }
+    return(.x)
+  }) %>% ungroup() %>% 
+  dplyr::select(-c(HospitalAdmissionTime)) %>% 
+  left_join(
+    ReportCT %>% distinct(`流水号`, .keep_all =T),
+    by = c("serialID" = "流水号")
+  ) %>% dplyr::select(-c(`路径`,MedID)) %>% 
+  mutate(
+    DIAGRESULT = str_replace_all(DIAGRESULT,"20[:digit:]{2}","****")
+  )
+write.csv(
+  CT2hospitalID ,
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/CT2hospitalID.csv"
+) 
+#CT的名称与表格里是否可匹配
+ImagePath <- list.files(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/CT",
+  recursive = T,
+  full.names = T
+) 
+SamplePath <- gsub("(.*)\\/.*","\\1",ImagePath) %>% unique()
+SampleName <- gsub(".*\\/(.*)","\\1",SamplePath)
+
+CTfile_name <- as.data.frame(SampleName) %>% 
+  mutate(SampleName1=SampleName) %>% 
+  separate(col = SampleName1,into = c("id1", "id2","id3","id4")) %>% 
+  mutate(SerialID= if_else(id2=="CT"|id2=="CR",id3,id2)) 
+
+
+
+```
+
+#CT片子转化成nii.gz
+```{r DCM2niigz}
+library(SimpleITK)
+library(MODIS)
+#for a simple case:
+ImagePath <- list.files(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/CT",
+  recursive = T,
+  full.names = T
+) 
+SamplePath <- gsub("(.*)\\/.*","\\1",ImagePath) %>% unique()
+SampleName <- gsub(".*\\/(.*)","\\1",SamplePath)
+#-----测试一个数据---------------
+ii=575
+data_directory = SamplePath[ii]
+series_IDs = SimpleITK::ImageSeriesReader_GetGDCMSeriesIDs(data_directory) 
+lapply(series_IDs, function(xx){
+  series_file_names1 =
+      ImageSeriesReader_GetGDCMSeriesFileNames(data_directory,xx)
+  len = length(series_file_names1)
+  size = median(file.size(series_file_names1))
+  return(c(len,size/1024))
+})
+series_reader = SimpleITK::ImageSeriesReader()
+series_reader$SetFileNames(
+  ImageSeriesReader_GetGDCMSeriesFileNames(data_directory,series_IDs[3])[-125]
+)
+series_reader$MetaDataDictionaryArrayUpdateOn()
+series_reader$LoadPrivateTagsOn()
+image3D = series_reader$Execute()
+image_viewer <- ImageViewer()
+image_viewer$SetApplication('/Applications/ITK-SNAP.app/Contents/MacOS/ITK-SNAP')
+image_viewer$Execute(image3D)
+#------------上面测试如何选择一个序列---------------------
+ii = 133
+data_directory = SamplePath[ii]
+case_id = CTfile_name[CTfile_name$SampleName==SampleName[ii],"SerialID"]
+output_folder = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/CTclean/"
+series_IDs = SimpleITK::ImageSeriesReader_GetGDCMSeriesIDs(data_directory) 
+series_file_names = NULL
+for (Series in series_IDs) {
+    SeriesSel = Series
+    series_file_names1 =
+      ImageSeriesReader_GetGDCMSeriesFileNames(data_directory,Series)
+    if(
+      (length(series_file_names1)>length(series_file_names) &
+       #length(series_file_names1) < 150 & 有些片子腹部与胸部一起，张数较多
+       median(file.size(series_file_names1)/1024) >211)
+       ){
+    SeriesSel = Series
+    series_file_names = series_file_names1
+    }
+}
+if(is.null(series_file_names)){
+  for (Series in series_IDs) {
+    SeriesSel = Series
+    series_file_names1 =
+      ImageSeriesReader_GetGDCMSeriesFileNames(data_directory,Series)
+    if(
+      length(series_file_names1)>length(series_file_names) 
+       #length(series_file_names1) < 150 & 有些片子腹部与胸部一起，张数较多
+       #median(file.size(series_file_names1)/1024) >211
+       ){
+    SeriesSel = Series
+    series_file_names = series_file_names1
+    }
+}
+}
+series_reader = SimpleITK::ImageSeriesReader()
+series_reader$SetFileNames(series_file_names)
+series_reader$MetaDataDictionaryArrayUpdateOn()
+series_reader$LoadPrivateTagsOn()
+image3D = series_reader$Execute()
+image_viewer <- ImageViewer()
+image_viewer$SetApplication('/Applications/ITK-SNAP.app/Contents/MacOS/ITK-SNAP')
+image_viewer$Execute(image3D) 
+SimpleITK::WriteImage(image3D,paste(output_folder,case_id,".nii.gz",sep = ""))
+###开始提取信息
+for (iii in 1:length(SamplePath)) {
+  data_directory = SamplePath[iii]
+  case_id = CTfile_name[CTfile_name$SampleName==SampleName[iii],"SerialID"]
+  output_folder = "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/CTclean/"
+  series_IDs = SimpleITK::ImageSeriesReader_GetGDCMSeriesIDs(data_directory) 
+  if(file.exists(paste(output_folder,case_id,".nii.gz",sep = ""))){
+    next
+  }
+  series_file_names = NULL
+  for (Series in series_IDs) {
+     SeriesSel = Series
+     series_file_names1 =
+      ImageSeriesReader_GetGDCMSeriesFileNames(data_directory,Series)
+     if(length(series_file_names1)>length(series_file_names) &
+       #length(series_file_names1) < 150 & 有些片子腹部与胸部一起，张数较多
+       median(file.size(series_file_names1)/1024) >211
+       ){
+     SeriesSel = Series
+     series_file_names = series_file_names1
+     }
+  }
+  if(is.null(series_file_names)){
+  for (Series in series_IDs) {
+    SeriesSel = Series
+    series_file_names1 =
+      ImageSeriesReader_GetGDCMSeriesFileNames(data_directory,Series)
+    if(
+      length(series_file_names1)>length(series_file_names) 
+       #length(series_file_names1) < 150 & 有些片子腹部与胸部一起，张数较多
+       #median(file.size(series_file_names1)/1024) >211
+       ){
+    SeriesSel = Series
+    series_file_names = series_file_names1
+    }
+  }
+  }
+  series_reader = SimpleITK::ImageSeriesReader()
+  series_reader$SetFileNames(series_file_names)
+  series_reader$MetaDataDictionaryArrayUpdateOn()
+  series_reader$LoadPrivateTagsOn()
+  image3D = series_reader$Execute()
+  SimpleITK::WriteImage(image3D,paste(output_folder,case_id,".nii.gz",sep = ""))
+  cat("##")
+}
+```
+
+#表格基本描述
+```{r}
+library(reproducible)
+#size for each table
+TableName <- list.files(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable"
+)
+TablePath <- list.files(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable",
+  full.names = T
+)
+MD5_hashes <- tools::md5sum(TablePath)
+FileSize <- file.info(TablePath)$size
+NoRows <- lapply(
+  TablePath,
+  function(xx){
+    return(nrow(data.table::fread(xx)))
+  }
+) %>% unlist()
+TableDESC <- data.frame(
+  Tables = TableName,
+  MD5_hashes = MD5_hashes,
+  NumObs = NoRows,
+  DESCription = c(
+    "Map CT file name to the hospital ID",
+    "Diagnosis",
+    "Sensitivity of pathogen to antibiotics for cultured bacteria",
+    'Examination report including CT, ultrasound and MRI',
+    "intrahospital transfer events",
+    "Dictionary for laboratory events",
+    "Laboratory findings",
+    "Medication events",
+    "Medical order",
+    "Microbiology cuture",
+    "Fluid Input and output",
+    "Vital Sign from Nursing chart",
+    "Patient admission table",
+    "Vital signs"
+  )
+)
+rownames(TableDESC) <- NULL
+print(TableDESC,quote = T)
+#Check that all tables use the same ID system
+lapply(
+  TablePath[!str_detect(TablePath,"Dictionary|dictionary")] ,
+  function(xx){
+    dd <- data.table::fread(xx)
+    ref <- data.table::fread(
+      "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/DataTable/PtAdmiTable.csv"
+    )
+    print(xx)
+    print(table(dd$Hospital_ID %in% ref$Hospital_ID))
+  }
+) 
+#不同表格的内涵展示
+CT2hospitalID_Tab <- data.frame(
+  "TableName" = rep("CT2hospitalID",length(names(CT2hospitalID))),
+  "Varibales" = names(CT2hospitalID),
+  "Explanation" = c("CT serial ID corresponding to the file name in the CTImage folder",
+                    "The time of CT examination in relative to the hospital admission time",
+                    "Patient series number: unique to each individual subject",
+                    "unique to each hospital admission",
+                    "Description of the CT finding in text",
+                    "Diagnosis for the CT finding in text"
+                    )
+) 
+PtAdmiTable_Tab <- data.frame(
+  "TableName" = rep("PtAdmiTable",length(names(PtAdmiTable))),
+  "Varibales" = names(PtAdmiTable),
+  "Explanation" = c("Patient series number: unique to each individual subject",
+                    "unique to each hospital admission",
+                    "Sex: Female and Male",
+                    "Hospital encounter type: inpatient and outpatient",
+                    "Chief Complain for patients who discharged within 24 hours after hospital admission",
+                    "Admission Status for patients who discharged within 24 hours after hospital admission",
+                    "Chief Complain for patients who died within 24 hours after hospital admission",
+                    "Admission Status for patients who died within 24 hours after hospital admission",
+                    "Chief Complain in Chinese",
+                    "Medical history in text",
+                    "Status on hospital discharge",
+                    "Diagnosis On Death",
+                    "Status On Discharge described in text",
+                    "Discharge time relative to hospital admission time as the time zero in days",
+                    "Days of Hospital Stay",
+                    "Chief Complain in English",
+                    "Age is categorized into bins for confidentiality",
+                    "Past history/comorbidities")
+) 
+Diagnosis_Tab <- data.frame(
+  "TableName" = rep("Diagnosis",length(names(Diagnosis))),
+  "Variables" = names(Diagnosis),
+  "Explanation" = c("Patient series number: unique to each individual subject",
+                    "unique to each hospital admission",
+                    "DESCription of diagnosis in free text",
+                    "ICD-10 code",
+                    "ICD-10 name for the diagnosis",
+                    "Time for making the diagnosis relative to hospital admission time as the time zero in days")
+) 
+DrugSens_Tab <- data.frame(
+  "TableName" = rep("DrugSens",length(names(DrugSens))),
+  "Variables" = names(DrugSens),
+  "Explanation" = c("Patient series number: unique to each individual subject",
+                    "unique to each hospital admission",
+                    "Code of the drug for sensitivity analysis",
+                    "Results for Drug Sensitivity test",
+                    "Minimum inhibitory concentration",
+                    "Time for the results relative to hospital admission time as the time zero in days",
+                    "Name of the tested drug",
+                    "Microorganism for testing",
+                    "Category for the test",
+                    "Sample name")
+) 
+ExamReport_Tab <- data.frame(
+  "TableName" = rep("ExamReport",length(names(ExamReport))),
+  "Variables" = names(ExamReport),
+  "Explanation" = c("Patient series number: unique to each individual subject",
+                    "unique to each hospital admission",
+                    "Category of examination",
+                    "DESCription of the examination in free form text",
+                    "Result finding",
+                    "Time for the examination results relative to hospital admission time as the time zero in days",
+                    "Name of the Examination")
+) 
+HospitalTransfer_Tab <- data.frame(
+  "TableName" = rep("HospitalTransfer",length(names(HospitalTransfer))),
+  "Variables" = names(HospitalTransfer),
+  "Explanation" = c("Patient series number: unique to each individual subject",
+                    "unique to each hospital admission",
+                    "time of transfer in in days relative to hospital admission",
+                    "time of transfer out in days relative to hospital admission",
+                    "department of transfer to",
+                    "department of transfer from")
+) 
+Lab_Tab <- data.frame(
+  "TableName" = rep("Lab",length(names(Lab))),
+  "Variables" = names(Lab),
+  "Explanation" = c("Patient series number: unique to each individual subject",
+                    "unique to each hospital admission",
+                    "Category of lab item",
+                    "Time of lab in days relative to hospital admission",
+                    "Results of the lab finding",
+                    "Unit of measurement",
+                    "Sample collection time in days relative to hospital admission",
+                    "Sample name","Name of lab item"
+                    )
+) 
+Medication_Tab <- data.frame(
+  "TableName" = rep("Medication",length(names(Medication))),
+  "Variables" = names(Medication),
+  "Explanation" = c("Patient series number: unique to each individual subject",
+                    "unique to each hospital admission",
+                    "Category of medication",
+                    "Single dose",
+                    "Frequency of administration",
+                    "Unit of measurement",
+                    "Start time of medication in days relative to hospital admission",
+                    "Stop time of medication in days relative to hospital admission",
+                    "Route of administration",
+                    "Medication name in text")
+) 
+MedOrder_Tab <- data.frame(
+  "TableName" = rep("MedOrder",length(names(MedOrder))),
+  "Variables" = names(MedOrder),
+  "Explanation" = c("Patient series number: unique to each individual subject",
+                    "unique to each hospital admission",
+                    "Type of medical order: regular or stat",
+                    "DESCription of medical order in free text",
+                    "Start time of medication in days relative to hospital admission",
+                    "Stop time of medication in days relative to hospital admission")
+) 
+MicrobiologyCulture_Tab <- data.frame(
+  "TableName" = rep("MicrobiologyCulture",length(names(MicrobiologyCulture))),
+  "Variables" = names(MicrobiologyCulture),
+  "Explanation" = c("Patient series number: unique to each individual subject",
+                    "unique to each hospital admission",
+                    "Microbiology Culture finding",
+                    "Microbiology Culture time in days relative to hospital admission",
+                    "Microbiology Culture sample",
+                    "Microbiology Culture Category",
+                    "DESCription of Microbiology Culture")
+) 
+VitalSign_Tab <- data.frame(
+  "TableName" = rep("VitalSign",length(names(VitalSign))),
+  "Variables" = names(VitalSign),
+  "Explanation" = c("Patient series number: unique to each individual subject",
+                    "unique to each hospital admission",
+                    "Vital Sign DESCription",
+                    "Vital Sign value",
+                    "Vital Sign unit of measurement",
+                    "Vital Sign measurement time in days relative to hospital admission")
+) 
+```
+
+#General description of patient characteristics
+```{r GeneralDESC}
+library(CBCgrps)
+tab1 <- twogrps(
+  PtAdmiTable %>% 
+    filter(EncounterType == "Inpatient") %>% 
+    mutate(StatusOnDischarge = recode(StatusOnDischarge,
+                                      Improved="Cured",
+                                      `Discharge to rehabilitation center`="Recovered",
+                                      `Recovered` = "Cured",
+                                      `Discharge against medical order`="Not cured",
+                                      Readmission = "Not cured",
+                                      Dead = "Not cured",
+                                      Others = "Unknown"),
+           StatusOnDischarge = if_else(StatusOnDischarge=="Recovered","Cured",StatusOnDischarge)
+           ) %>% 
+    as.data.frame(),
+  gvar= "Sex",
+  varlist = c("Age_cut","DaysHospitalStay","StatusOnDischarge"),sim = T
+)
+#Chest CT showing 
+library(oro.nifti)
+library(ggBrain)
+library(RNifti)
+
+chestImage = readNIfTI("/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/CTclean/17171437.nii.gz")
+pixdim(chestImage) 
+#now add aethetic changes with conventional ggplot code.
+ggBrain(brains=chestImage,mar=1:3,mar_ind=c(250,250,80),
+        row_ind=    c(1,2,1),
+        col_ind=    c(2,1,1),
+        type='structural',tri_planar=TRUE, lines_color='black',
+        fix_ratio = F) +
+  scale_fill_continuous(low="black", high="white") + 
+  theme_black_bg()
+
+pdf(
+  "/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/FigSampleCT.pdf",
+  width = 6,height = 6
+)  
+view(
+  lyr("/Users/zhangzhongheng/Documents/2022/ChestCT_Zhejiang/CTclean/17171437.nii.gz", 
+      min=-1000, max=2000,scale = "rainbow"), 
+  point=c(250,250,80), 
+  interactive=FALSE)
+dev.off()
+#now add aethetic changes with conventional ggplot code.
+dd + scale_fill_continuous(low="black", high="white") + theme_black_bg()
+#入院的时间趋势
+library(lubridate)
+library(ggstatsplot)
+plotTimeSeries <- EMR_add %>% 
+  mutate(Month = round_date(HospitalAdmissionTime,unit = "quarter")) %>% 
+  count(Month,Sex) %>% 
+  ggplot(aes(x = Month, y = n)) + 
+  geom_area(aes(color = Sex, fill = Sex), 
+            alpha = 0.5, position = position_dodge(0.8)) +
+  scale_color_manual(values = c("#00AFBB", "#E7B800")) +
+  scale_fill_manual(values = c("#00AFBB", "#E7B800"))+
+  theme_minimal()+
+  labs(x= "Resolution in Quarter",y = "Number of admissions")
+pdf(
+  "/Users/zhangzhongheng/Documents/2022/浙江省人民医院数据库构建/plotTimeSeries.pdf",
+  width = 6,height = 6
+)  
+plotTimeSeries
+dev.off()
+#不同患者住院时长分布
+Plot_LOS <- EMR %>% 
+  filter( DaysHospitalStay < 60) %>% 
+  ggstatsplot::grouped_gghistostats(
+    x = DaysHospitalStay,
+    xlab = "Days of hospital stay",
+     grouping.var = Sex,
+    plotgrid.args = list(nrow = 2),
+    bin.args = list(color = "black", fill = "red", alpha = 0.7)
+  )
+pdf(
+  "/Users/zhangzhongheng/Documents/2022/浙江省人民医院数据库构建/LOS_Sex.pdf",
+  width = 6,height = 6
+)  
+Plot_LOS
+dev.off()
+```
+
